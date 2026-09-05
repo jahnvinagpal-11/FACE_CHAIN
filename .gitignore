@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+.DS_Store
+data/candidate.jpg
+data/chain.json
+data/last_run.json

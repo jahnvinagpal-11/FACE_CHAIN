@@ -76,4 +76,11 @@ if __name__ == "__main__":
         print("Title:", result.get("title"))
         print("Source:", result.get("source"))
         print("Link:", result.get("link"))
-        print("Image:", result.get("thumbnail"))
+        print("Thumbnail:", result.get("thumbnail"))
+        print("Full image:", result.get("image"))
+        print(
+            "Dimensions:",
+            result.get("image_width"),
+            "x",
+            result.get("image_height")
+        )
