@@ -404,8 +404,8 @@ def sift_similarity(path_a, path_b):
 def overlay_penalty(path):
 
     """
-    Look for suspicious added content near the top/bottom
-    edges of an image.
+    Look for suspicious added content near the edges/corners
+    of an image.
 
     This is intentionally a soft penalty, NOT a hard decision.
 
@@ -415,7 +415,13 @@ def overlay_penalty(path):
 
         vs
 
-        original photo + fanpage text/watermark
+        original photo + fanpage caption/watermark
+
+    Small corner watermarks (e.g. "SITE.COM" in a corner) get
+    diluted to near-zero if you only average edge density over
+    a full-width strip, so we also check each corner in
+    isolation -- that's where logos/handles/watermarks usually
+    sit.
     """
 
     try:
@@ -433,32 +439,21 @@ def overlay_penalty(path):
         height, width = img.shape[:2]
 
 
-        if height < 50:
+        if height < 50 or width < 50:
 
             return 0.0
 
 
-        # Bottom 15%
-        bottom = img[
-            int(height * 0.85):height,
-            :
-        ]
-
-
-        # Top 10%
-        top = img[
-            0:int(height * 0.10),
-            :
-        ]
-
-
         def edge_density(region):
+
+            if region.size == 0:
+
+                return 0.0
 
             gray = cv2.cvtColor(
                 region,
                 cv2.COLOR_BGR2GRAY
             )
-
 
             edges = cv2.Canny(
                 gray,
@@ -466,37 +461,49 @@ def overlay_penalty(path):
                 200
             )
 
-
             return np.mean(
                 edges > 0
             )
 
 
-        top_density = edge_density(top)
+        # Full-width strips -- catches centered captions/bars.
+        bottom_strip = img[int(height * 0.85):height, :]
+        top_strip = img[0:int(height * 0.10), :]
 
-        bottom_density = edge_density(bottom)
-
-
-        # Very high edge density at the bottom can indicate
-        # text overlays/captions.
-        #
-        # This is only a small penalty.
-
-        suspicious = max(
-            0.0,
-            bottom_density - 0.18
+        strip_density = max(
+            edge_density(top_strip),
+            edge_density(bottom_strip),
         )
 
 
-        suspicious += max(
+        # Individual corners -- catches small watermarks/handles
+        # that a full-width average would dilute away.
+        corner_h = max(int(height * 0.15), 1)
+        corner_w = max(int(width * 0.25), 1)
+
+        corners = [
+            img[0:corner_h, 0:corner_w],                      # top-left
+            img[0:corner_h, width - corner_w:width],          # top-right
+            img[height - corner_h:height, 0:corner_w],        # bottom-left
+            img[height - corner_h:height, width - corner_w:width],  # bottom-right
+        ]
+
+        corner_density = max(
+            edge_density(c) for c in corners
+        )
+
+
+        # Whichever signal is stronger drives the penalty.
+        suspicious = max(
             0.0,
-            top_density - 0.18
+            strip_density - 0.18,
+            corner_density - 0.22,
         )
 
 
         return min(
-            suspicious,
-            0.20
+            suspicious * 1.5,
+            0.45
         )
 
 
