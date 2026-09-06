@@ -1,26 +1,3 @@
-"""
-FACE_CHAIN end-to-end pipeline:
-
-    input image
-        ->
-    Google Lens / reverse image search
-        ->
-    social-media candidates
-        ->
-    face similarity
-    + perceptual hash
-    + SIFT feature matching
-    + aspect-ratio comparison
-        ->
-    select the closest ORIGINAL/UNALTERED image candidate
-        ->
-    blockchain record
-
-Run from repo root:
-
-    python -m src.main
-"""
-
 import json
 import shutil
 import time
@@ -51,10 +28,6 @@ from src.blockchain import (
 )
 
 
-# ============================================================
-# PATHS
-# ============================================================
-
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 SUPPORTED_INPUT_EXTENSIONS = (
@@ -78,41 +51,14 @@ LAST_RUN_FILE = DATA_DIR / "last_run.json"
 
 DEBUG_DIR = DATA_DIR / "debug_candidates"
 
-
-# ============================================================
-# THRESHOLDS
-# ============================================================
-
-# Minimum face similarity required
 MATCH_THRESHOLD = 0.55
 
 
-# pHash:
-#
-# 0 = identical
-# lower = more visually similar
-#
+
 PHASH_NEAR_DUPLICATE_THRESHOLD = 12
 
 
-# ============================================================
-# INPUT IMAGE
-# ============================================================
-
 def find_input_image() -> Path:
-
-    """
-    Find the user's input image.
-
-    Priority:
-
-        input.jpg
-        input.jpeg
-        input.png
-        input.webp
-
-    Otherwise use the most recently modified image.
-    """
 
     for ext in SUPPORTED_INPUT_EXTENSIONS:
 
@@ -173,20 +119,7 @@ def find_input_image() -> Path:
 
 INPUT_IMAGE = find_input_image()
 
-
-# ============================================================
-# pHASH
-# ============================================================
-
 def phash_distance(path_a, path_b):
-
-    """
-    Perceptual hash distance.
-
-    Lower = more visually similar.
-
-    0 = identical / extremely close.
-    """
 
     hash_a = imagehash.phash(
 
@@ -205,12 +138,6 @@ def phash_distance(path_a, path_b):
 
 def phash_score(distance):
 
-    """
-    Convert pHash distance into 0-1 score.
-
-    Lower distance = higher score.
-    """
-
     if distance is None:
 
         return 0.0
@@ -223,23 +150,7 @@ def phash_score(distance):
         min(1.0, score)
     )
 
-
-# ============================================================
-# ASPECT RATIO
-# ============================================================
-
 def aspect_ratio_score(path_a, path_b):
-
-    """
-    Compare image aspect ratios.
-
-    Same aspect ratio = 1.0
-
-    Very different aspect ratio = lower score.
-
-    This helps penalize reposts that have been turned into
-    a different format with text added around the image.
-    """
 
     try:
 
@@ -262,9 +173,6 @@ def aspect_ratio_score(path_a, path_b):
             ratio_a - ratio_b
         )
 
-
-        # 0 difference -> 1.0
-        # larger difference -> lower
         score = 1.0 - min(
             difference,
             1.0
@@ -278,25 +186,7 @@ def aspect_ratio_score(path_a, path_b):
 
         return 0.0
 
-
-# ============================================================
-# SIFT FEATURE MATCHING
-# ============================================================
-
 def sift_similarity(path_a, path_b):
-
-    """
-    Compare local visual features between two images.
-
-    This is useful when:
-
-        - image is resized
-        - image is slightly cropped
-        - compression changed
-        - text was added around the image
-
-    Returns a score between 0 and 1.
-    """
 
     try:
 
@@ -372,16 +262,11 @@ def sift_similarity(path_a, path_b):
             m, n = pair
 
 
-            # Lowe's ratio test
             if m.distance < 0.70 * n.distance:
 
                 good_matches.append(m)
 
 
-        # Normalize number of good matches.
-        #
-        # 40+ good matches is considered extremely strong.
-        #
 
         score = min(
             len(good_matches) / 40.0,
@@ -397,32 +282,7 @@ def sift_similarity(path_a, path_b):
         return 0.0
 
 
-# ============================================================
-# IMAGE ALTERATION / OVERLAY HEURISTIC
-# ============================================================
-
 def overlay_penalty(path):
-
-    """
-    Look for suspicious added content near the edges/corners
-    of an image.
-
-    This is intentionally a soft penalty, NOT a hard decision.
-
-    It helps with images such as:
-
-        original photo
-
-        vs
-
-        original photo + fanpage caption/watermark
-
-    Small corner watermarks (e.g. "SITE.COM" in a corner) get
-    diluted to near-zero if you only average edge density over
-    a full-width strip, so we also check each corner in
-    isolation -- that's where logos/handles/watermarks usually
-    sit.
-    """
 
     try:
 
@@ -466,7 +326,6 @@ def overlay_penalty(path):
             )
 
 
-        # Full-width strips -- catches centered captions/bars.
         bottom_strip = img[int(height * 0.85):height, :]
         top_strip = img[0:int(height * 0.10), :]
 
@@ -475,17 +334,14 @@ def overlay_penalty(path):
             edge_density(bottom_strip),
         )
 
-
-        # Individual corners -- catches small watermarks/handles
-        # that a full-width average would dilute away.
         corner_h = max(int(height * 0.15), 1)
         corner_w = max(int(width * 0.25), 1)
 
         corners = [
-            img[0:corner_h, 0:corner_w],                      # top-left
-            img[0:corner_h, width - corner_w:width],          # top-right
-            img[height - corner_h:height, 0:corner_w],        # bottom-left
-            img[height - corner_h:height, width - corner_w:width],  # bottom-right
+            img[0:corner_h, 0:corner_w],                      
+            img[0:corner_h, width - corner_w:width],          
+            img[height - corner_h:height, 0:corner_w],        
+            img[height - corner_h:height, width - corner_w:width],  
         ]
 
         corner_density = max(
@@ -493,7 +349,6 @@ def overlay_penalty(path):
         )
 
 
-        # Whichever signal is stronger drives the penalty.
         suspicious = max(
             0.0,
             strip_density - 0.18,
@@ -511,16 +366,7 @@ def overlay_penalty(path):
 
         return 0.0
 
-
-# ============================================================
-# MAIN PIPELINE
-# ============================================================
-
 def run_pipeline():
-
-    # ========================================================
-    # STEP 1
-    # ========================================================
 
     print("=" * 60)
 
@@ -556,11 +402,6 @@ def run_pipeline():
         f"Face detected. Embedding size: "
         f"{len(input_embedding)}"
     )
-
-
-    # ========================================================
-    # STEP 2
-    # ========================================================
 
     print("\n" + "=" * 60)
 
@@ -604,20 +445,12 @@ def run_pipeline():
     )
 
 
-    # ========================================================
-    # BEST RESULT TRACKING
-    # ========================================================
-
     best_match = None
 
     best_score = -1.0
 
     best_candidate_path = None
 
-
-    # ========================================================
-    # PROCESS CANDIDATES
-    # ========================================================
 
     for i, candidate in enumerate(
         matches[:20],
@@ -636,10 +469,6 @@ def run_pipeline():
             f"{candidate.get('title')}"
         )
 
-
-        # ----------------------------------------------------
-        # Image URLs
-        # ----------------------------------------------------
 
         urls_to_try = [
 
@@ -672,10 +501,6 @@ def run_pipeline():
         last_error = None
 
 
-        # ----------------------------------------------------
-        # Download candidate
-        # ----------------------------------------------------
-
         for image_url in urls_to_try:
 
             try:
@@ -687,13 +512,6 @@ def run_pipeline():
                     str(CANDIDATE_IMAGE)
 
                 )
-
-
-                # A download can "succeed" (no exception) while
-                # what actually landed on disk isn't a decodable
-                # image -- an HTML error page, a truncated file,
-                # an unsupported/corrupt format, etc. Verify it
-                # actually opens before trusting it.
 
                 check = cv2.imread(str(CANDIDATE_IMAGE))
 
@@ -722,11 +540,6 @@ def run_pipeline():
             )
 
             continue
-
-
-        # ----------------------------------------------------
-        # Save debug copy
-        # ----------------------------------------------------
 
         safe_source = "".join(
 
@@ -760,11 +573,6 @@ def run_pipeline():
             debug_path
 
         )
-
-
-        # ====================================================
-        # FACE SCORE
-        # ====================================================
 
         try:
 
@@ -804,11 +612,6 @@ def run_pipeline():
 
             face_score = 0.0
 
-
-        # ====================================================
-        # PHASH
-        # ====================================================
-
         try:
 
             distance = phash_distance(
@@ -831,11 +634,6 @@ def run_pipeline():
 
             image_score = 0.0
 
-
-        # ====================================================
-        # SIFT
-        # ====================================================
-
         sift_score = sift_similarity(
 
             INPUT_IMAGE,
@@ -844,10 +642,6 @@ def run_pipeline():
 
         )
 
-
-        # ====================================================
-        # ASPECT RATIO
-        # ====================================================
 
         ratio_score = aspect_ratio_score(
 
@@ -858,38 +652,11 @@ def run_pipeline():
         )
 
 
-        # ====================================================
-        # OVERLAY PENALTY
-        # ========================================================
-
         penalty = overlay_penalty(
 
             CANDIDATE_IMAGE
 
         )
-
-
-        # ====================================================
-        # FINAL SCORE
-        # ====================================================
-
-        #
-        # We DO NOT want face similarity to dominate.
-        #
-        # A fanpage repost can have:
-        #
-        #     face = 0.95
-        #
-        # while the actual source image also has:
-        #
-        #     face = 0.95
-        #
-        #
-        # Therefore:
-        #
-        # pHash + SIFT + aspect ratio
-        # are more important.
-        #
 
         final_score = (
 
@@ -921,11 +688,6 @@ def run_pipeline():
                 final_score
             )
         )
-
-
-        # ====================================================
-        # PRINT SCORES
-        # ====================================================
 
         print(
             f"Face similarity: "
@@ -982,11 +744,6 @@ def run_pipeline():
             f"{debug_path}"
         )
 
-
-        # ====================================================
-        # BEST RESULT
-        # ====================================================
-
         if final_score > best_score:
 
             best_score = final_score
@@ -1004,10 +761,6 @@ def run_pipeline():
             )
 
 
-    # ========================================================
-    # NO RESULT
-    # ========================================================
-
     if best_match is None:
 
         print(
@@ -1016,10 +769,6 @@ def run_pipeline():
 
         return
 
-
-    # ========================================================
-    # BEST RESULT
-    # ========================================================
 
     print("\n" + "=" * 60)
 
@@ -1064,11 +813,6 @@ def run_pipeline():
         "\nOpen best_match.jpg and visually confirm "
         "that it is the original/unmodified image."
     )
-
-
-    # ========================================================
-    # STEP 3: BLOCKCHAIN
-    # ========================================================
 
     print("\n" + "=" * 60)
 
@@ -1136,11 +880,6 @@ def run_pipeline():
         f"{'PASSED' if verify_simulated_chain() else 'FAILED'}"
     )
 
-
-    # ========================================================
-    # OPTIONAL REAL WEB3
-    # ========================================================
-
     web3_result = None
 
 
@@ -1185,11 +924,6 @@ def run_pipeline():
             "using simulated chain only.)"
         )
 
-
-    # ========================================================
-    # SAVE LAST RUN
-    # ========================================================
-
     last_run = {
 
         "record": record,
@@ -1231,11 +965,6 @@ def run_pipeline():
     print(
         "python -m src.verify"
     )
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
 
