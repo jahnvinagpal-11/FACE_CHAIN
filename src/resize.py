@@ -1,11 +1,3 @@
-"""
-One-off helper: resize/compress data/input.jpg to fit SerpAPI's image
-upload limits (JPG/PNG/WebP, max 500KB) using high-quality Lanczos
-resampling -- sharper than a quick `sips -Z` downscale.
-
-Run with:  python -m src.resize_input
-"""
-
 from pathlib import Path
 from PIL import Image
 
@@ -13,7 +5,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 INPUT_IMAGE = DATA_DIR / "input.jpg"
 
 MAX_DIM = 1280
-MAX_BYTES = 480_000  # a little under SerpAPI's 500KB cap
+MAX_BYTES = 480_000 
 
 
 def resize_input():
