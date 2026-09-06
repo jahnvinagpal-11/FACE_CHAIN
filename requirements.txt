@@ -1,0 +1,11 @@
+opencv-python
+insightface
+onnxruntime
+scikit-learn
+numpy
+serpapi
+python-dotenv
+requests
+web3
+Pillow
+imagehash

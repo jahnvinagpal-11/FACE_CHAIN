@@ -1,7 +1,25 @@
+"""
+FACE_CHAIN end-to-end pipeline:
+
+    face scan (data/input.jpg)
+        -> reverse image / web search (SerpAPI + Google Lens)
+        -> pick best matching social media post
+        -> download the matched image, confirm it's the same face
+        -> hash the discovered post's data and record it on-chain
+           (simulated local chain, plus a real testnet/local node if
+           RPC_URL + PRIVATE_KEY are set in .env)
+
+Run with:  python -m src.main
+(run from the repo root so the `src.` imports resolve)
+"""
+
 import json
 import shutil
 import time
 from pathlib import Path
+
+from PIL import Image
+import imagehash
 
 from src.face_engine import get_embedding_from_file, compare_faces
 from src.web_search import search_image, find_social_matches
@@ -14,18 +32,80 @@ from src.blockchain import (
 )
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-INPUT_IMAGE = DATA_DIR / "input.jpg"
+
+SUPPORTED_INPUT_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
+
+# Filenames the pipeline generates itself -- never pick these as the input,
+# even if they match a supported extension.
+GENERATED_FILENAMES = {"candidate.jpg", "best_match.jpg"}
+
+
+def find_input_image() -> Path:
+    """
+    Find the input photo in data/.
+
+    Prefers a file explicitly named input.<ext>. If none exists, falls
+    back to the most recently modified supported image file in data/
+    (excluding files the pipeline itself generates), so you can just drop
+    any photo in there without renaming it.
+    """
+    for ext in SUPPORTED_INPUT_EXTENSIONS:
+        candidate = DATA_DIR / f"input{ext}"
+        if candidate.exists():
+            return candidate
+
+    candidates = [
+        p for p in DATA_DIR.iterdir()
+        if p.is_file()
+        and p.suffix.lower() in SUPPORTED_INPUT_EXTENSIONS
+        and p.name not in GENERATED_FILENAMES
+    ]
+
+    if not candidates:
+        raise FileNotFoundError(
+            f"No input image found in {DATA_DIR}. Add a photo named "
+            f"input.jpg (or .png/.webp/.jpeg), or any image file there."
+        )
+
+    chosen = max(candidates, key=lambda p: p.stat().st_mtime)
+    print(f"(No file named 'input.<ext>' found -- using most recently "
+          f"modified image instead: {chosen.name})")
+    return chosen
+
+
+INPUT_IMAGE = find_input_image()
 CANDIDATE_IMAGE = DATA_DIR / "candidate.jpg"
 BEST_MATCH_IMAGE = DATA_DIR / "best_match.jpg"
 LAST_RUN_FILE = DATA_DIR / "last_run.json"
+DEBUG_DIR = DATA_DIR / "debug_candidates"
 
-MATCH_THRESHOLD = 0.35  # cosine similarity threshold for insightface embeddings
+MATCH_THRESHOLD = 0.55  # cosine similarity threshold for insightface embeddings
+                         # (true matches in testing scored 0.85-0.88; raised
+                         # from 0.35 after seeing false-accepts on non-face
+                         # candidate images)
+
+# Perceptual-hash near-duplicate detection. A pHash distance of 0 means
+# pixel-identical; typical "same photo, different compression/crop"
+# reposts land under ~10-12. This catches cases where the exact same
+# photo was reposted but face-embedding similarity alone is noisy (e.g.
+# due to a low-res thumbnail), giving a second, independent signal that
+# it's a genuine repost of the same image.
+PHASH_NEAR_DUPLICATE_THRESHOLD = 12
+PHASH_CONFIDENCE_SCORE = 0.95  # score assigned when a near-duplicate is found
+
+
+def phash_distance(path_a, path_b):
+    """Perceptual-hash Hamming distance between two images (0 = identical)."""
+    hash_a = imagehash.phash(Image.open(path_a).convert("RGB"))
+    hash_b = imagehash.phash(Image.open(path_b).convert("RGB"))
+    return hash_a - hash_b
 
 
 def run_pipeline():
     print("=" * 60)
     print("STEP 1: Face detection on input scan")
     print("=" * 60)
+    print(f"Using input image: {INPUT_IMAGE}")
 
     input_embedding = get_embedding_from_file(str(INPUT_IMAGE))
     if input_embedding is None:
@@ -45,29 +125,73 @@ def run_pipeline():
         return
 
     print(f"Found {len(matches)} candidate social media result(s).")
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
     best_match = None
     best_score = -1.0
 
-    for i, candidate in enumerate(matches[:10], start=1):
-        thumb = candidate.get("thumbnail")
-        if not thumb:
+    for i, candidate in enumerate(matches[:20], start=1):
+        # Try the full-resolution "image" URL first (better quality than
+        # the tiny compressed "thumbnail"), but some sources (notably
+        # TikTok's CDN) block direct downloads of their "image" URL or
+        # return non-image content. Fall back to "thumbnail" in that case
+        # instead of skipping the candidate outright.
+        candidates_to_try = [
+            url for url in (candidate.get("image"), candidate.get("thumbnail"))
+            if url
+        ]
+
+        if not candidates_to_try:
             continue
 
-        try:
-            download_image(thumb, str(CANDIDATE_IMAGE))
-            candidate_embedding = get_embedding_from_file(str(CANDIDATE_IMAGE))
-            score = compare_faces(input_embedding, candidate_embedding)
-        except Exception as e:
-            print(f"  [{i}] skipped ({e})")
-            continue
+        score = None
+        near_duplicate = False
+        last_error = None
+
+        for image_url in candidates_to_try:
+            try:
+                download_image(image_url, str(CANDIDATE_IMAGE))
+                # Save a permanent copy for later visual inspection --
+                # data/debug_candidates/01_instagram.jpg etc. -- since
+                # CANDIDATE_IMAGE itself gets overwritten every iteration.
+                safe_source = "".join(
+                    c if c.isalnum() else "_" for c in str(candidate.get("source", "unknown"))
+                )
+                debug_path = DEBUG_DIR / f"{i:02d}_{safe_source}.jpg"
+                shutil.copyfile(CANDIDATE_IMAGE, debug_path)
+
+                candidate_embedding = get_embedding_from_file(str(CANDIDATE_IMAGE))
+                face_score = compare_faces(input_embedding, candidate_embedding)
+
+                # Second, independent signal: is this the *same photo*,
+                # pixel-wise, regardless of whether face detection worked
+                # well on a low-quality copy of it? Catches reposts that
+                # face-embedding similarity alone scores unreliably.
+                try:
+                    distance = phash_distance(INPUT_IMAGE, CANDIDATE_IMAGE)
+                except Exception:
+                    distance = None
+
+                if distance is not None and distance <= PHASH_NEAR_DUPLICATE_THRESHOLD:
+                    near_duplicate = True
+                    score = max(face_score or 0.0, PHASH_CONFIDENCE_SCORE)
+                else:
+                    score = face_score
+
+                if score is not None:
+                    break  # got a usable signal, no need to try the fallback URL
+            except Exception as e:
+                last_error = e
+                continue
 
         if score is None:
-            print(f"  [{i}] no face found in candidate image, skipping")
+            reason = f"({last_error})" if last_error else "(no face found in candidate image)"
+            print(f"  [{i}] skipped {reason}")
             continue
 
+        tag = "  [near-duplicate image detected]" if near_duplicate else ""
         print(f"  [{i}] {candidate.get('source')} - {candidate.get('title')!r} "
-              f"-> similarity {score:.4f}")
+              f"-> similarity {score:.4f}{tag}  (see data/debug_candidates/{i:02d}_{safe_source}.jpg)")
 
         if score > best_score:
             best_score = score
